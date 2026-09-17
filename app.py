@@ -25,7 +25,7 @@ def youtube_search_without_api(query):
         'noplaylist': True,
         'extract_flat': False,
         'quiet': True,
-        'default_search': 'ytsearch3', # NUR NOCH 3 TREFFER = BLITZSCHNELL!
+        'default_search': 'ytsearch2', # NUR NOCH 3 TREFFER = BLITZSCHNELL!
         'nocheckcertificate': True,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
