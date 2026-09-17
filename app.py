@@ -2,49 +2,77 @@
 import logging
 import random
 from flask import Flask, jsonify, request
+import yt_dlp
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.DEBUG)
 
-letzte_suche = "rammstein"
+letzte_suche = "Charts"
+aktueller_token = ""
+aktuelle_audio_url = ""
+pausen_zeitpunkt = 0
+aktuell_gespielte_id = ""
 
-# ABSOLUT SICHERE AUDIO-LINKS (Direkt von zertifizierten Amazon-Servern freigegeben!)
-MUSIK_DATENBANK = {
-    "rammstein": [
-        {"title": "Sonne (Cloud Mix)", "id": "ram1", "url": "https://alexademo.xyz"},
-        {"title": "Du Hast (Cloud Mix)", "id": "ram2", "url": "https://alexademo.xyz"}
-    ],
-    "helene fischer": [
-        {"title": "Atemlos (Cloud Mix)", "id": "hel1", "url": "https://alexademo.xyz"}
-    ],
-    "slipknot": [
-        {"title": "Psychosocial (Cloud Mix)", "id": "slip1", "url": "https://alexademo.xyz"}
-    ]
-}
-
-def finde_musik(query):
-    global letzte_suche
-    if not query:
-        query = letzte_suche
+def youtube_search_without_api(query):
+    global letzte_suche, aktuell_gespielte_id
+    if query:
+        letzte_suche = query
+        
+    suchbegriff = letzte_suche.lower().replace("playlist", "").replace("album", "").strip()
     
-    q_clean = query.lower().strip()
-    letzte_suche = q_clean
-    
-    for kuenstler, lieder in MUSIK_DATENBANK.items():
-        if kuenstler in q_clean:
-            song = random.choice(lieder)
-            return song["id"], song["title"], song["url"]
+    ydl_opts = {
+        'format': 'worstaudio/bestaudio', 
+        'noplaylist': True,
+        'extract_flat': False,
+        'quiet': True,
+        'default_search': 'ytsearch3', # Lädt nur 3 Treffer = blitzschnell für den Server!
+        'nocheckcertificate': True,
+        # HIER IST DER SMARTPHONE-TRICK: Wir tarnen den Server als mobiles Android-Handy!
+        # Dadurch erlaubt YouTube die Suche aus Rechenzentren komplett ohne Sperren!
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
+        }
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # Wir würfeln die Zusätze, damit YouTube uns immer unterschiedliche Versionen liefert!
+            zusatz = random.choice([" audio", " lyrics", " live"])
+            search_query = f"ytsearch3:{suchbegriff}{zusatz}"
             
-    song = random.choice(MUSIK_DATENBANK["rammstein"])
-    return song["id"], song["title"], song["url"]
+            info = ydl.extract_info(search_query, download=False)
+            
+            if 'entries' in info and len(info['entries']) > 0:
+                eintraege = [v for v in info['entries'] if v]
+                
+                # Wechselsperre: Aktuell laufendes Lied ausschließen
+                pool = [v for v in eintraege if v.get('id') != aktuell_gespielte_id]
+                if not pool:
+                    pool = eintraege
+                
+                video = random.choice(pool)
+                video_id = video.get('id')
+                aktuell_gespielte_id = video_id
+                    
+                return video_id, video.get('title'), video.get('url')
+    except Exception as e:
+        logging.error(f"Fehler bei der YouTube-Direktsuche: {e}")
+    return None, None, None
 
 @app.route("/", methods=["POST"])
 def alexa_endpoint():
+    global aktueller_token, aktuelle_audio_url, pausen_zeitpunkt
     alexa_request = request.get_json()
     request_type = alexa_request["request"]["type"]
     
+    if "context" in alexa_request and "AudioPlayer" in alexa_request["context"]:
+        player_state = alexa_request["context"]["AudioPlayer"]
+        if player_state.get("playerActivity") == "PLAYING":
+            pausen_zeitpunkt = player_state.get("offsetInMilliseconds", 0)
+
     if request_type == "LaunchRequest":
-        return jsonify({"version": "1.0", "response": {"outputSpeech": {"type": "PlainText", "text": "Cloud Server bereit. Was möchtest du hören?"}, "shouldEndSession": False}})
+        return jsonify({"version": "1.0", "response": {"outputSpeech": {"type": "PlainText", "text": "YouTube Cloud Server ist bereit. Was möchtest du hören?"}, "shouldEndSession": False}})
         
     elif request_type == "IntentRequest":
         intent_name = alexa_request["request"]["intent"]["name"]
@@ -56,7 +84,13 @@ def alexa_endpoint():
             if intent_name == "AMAZON.NextIntent":
                 query = letzte_suche
                 
-            video_id, title, audio_url = finde_musik(query)
+            video_id, title, audio_url = youtube_search_without_api(query)
+            if not video_id or not audio_url:
+                return jsonify({"version": "1.0", "response": {"outputSpeech": {"type": "PlainText", "text": "Ich konnte kein Lied auf YouTube finden."}}})
+                
+            aktueller_token = video_id
+            aktuelle_audio_url = audio_url
+            pausen_zeitpunkt = 0 
             
             return jsonify({
                 "version": "1.0",
@@ -74,6 +108,25 @@ def alexa_endpoint():
             
         elif intent_name in ["AMAZON.PauseIntent", "AMAZON.StopIntent"]:
             return jsonify({"version": "1.0", "response": {"directives": [{"type": "AudioPlayer.Stop"}]}})
+            
+        elif intent_name == "AMAZON.ResumeIntent":
+            if aktuelle_audio_url:
+                return jsonify({
+                    "version": "1.0",
+                    "response": {
+                        "directives": [{
+                            "type": "AudioPlayer.Play",
+                            "playBehavior": "REPLACE_ALL",
+                            "audioItem": {
+                                "stream": {
+                                    "token": aktueller_token,
+                                    "url": aktuelle_audio_url,
+                                    "offsetInMilliseconds": pausen_zeitpunkt
+                                }
+                            }
+                        }]
+                    }
+                })
             
     return jsonify({"version": "1.0", "response": {"shouldEndSession": True}})
 
